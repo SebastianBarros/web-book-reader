@@ -1,0 +1,40 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+dist-ssr/
+*.local
+
+# Editor / OS
+.vscode/*
+!.vscode/settings.json
+!.vscode/extensions.json
+.idea/
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# Env
+.env
+.env.local
+.env.*.local
+
+# TypeScript build info
+*.tsbuildinfo
+
+# Test book files the user may drag-drop during dev
+*.mobi
+*.epub
+*.azw
+*.azw3
+*.fb2
+*.fbz
+*.cbz
