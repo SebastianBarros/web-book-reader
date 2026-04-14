@@ -27,6 +27,7 @@ export interface LayoutSettings {
   flow: 'paginated' | 'scrolled'
   maxColumns: 1 | 2
   fontFamily: string
+  showEstimates: boolean
 }
 
 export const defaultSettings: LayoutSettings = {
@@ -38,6 +39,21 @@ export const defaultSettings: LayoutSettings = {
   flow: 'paginated',
   maxColumns: 1,
   fontFamily: 'Literata',
+  showEstimates: true,
+}
+
+export interface ReadingStats {
+  emaRate: number // fractions of book per millisecond
+  sampleCount: number
+  totalActiveMs: number
+  updatedAt: number
+}
+
+export const emptyReadingStats: ReadingStats = {
+  emaRate: 0,
+  sampleCount: 0,
+  totalActiveMs: 0,
+  updatedAt: 0,
 }
 
 interface ReaderDB extends DBSchema {
@@ -54,18 +70,27 @@ interface ReaderDB extends DBSchema {
     key: string
     value: LayoutSettings
   }
+  stats: {
+    key: string
+    value: ReadingStats
+  }
 }
 
 let dbPromise: Promise<IDBPDatabase<ReaderDB>> | null = null
 
 function getDB() {
   if (!dbPromise) {
-    dbPromise = openDB<ReaderDB>('online-mobi-reader', 1, {
-      upgrade(db) {
-        const books = db.createObjectStore('books', { keyPath: 'id' })
-        books.createIndex('by-addedAt', 'addedAt')
-        db.createObjectStore('progress', { keyPath: 'bookId' })
-        db.createObjectStore('settings')
+    dbPromise = openDB<ReaderDB>('online-mobi-reader', 2, {
+      upgrade(db, oldVersion) {
+        if (oldVersion < 1) {
+          const books = db.createObjectStore('books', { keyPath: 'id' })
+          books.createIndex('by-addedAt', 'addedAt')
+          db.createObjectStore('progress', { keyPath: 'bookId' })
+          db.createObjectStore('settings')
+        }
+        if (oldVersion < 2) {
+          db.createObjectStore('stats')
+        }
       },
     })
   }
@@ -114,4 +139,15 @@ export async function loadSettings(): Promise<LayoutSettings> {
 export async function saveSettings(settings: LayoutSettings): Promise<void> {
   const db = await getDB()
   await db.put('settings', settings, 'layout')
+}
+
+export async function loadReadingStats(): Promise<ReadingStats> {
+  const db = await getDB()
+  const stored = await db.get('stats', 'global')
+  return stored ?? emptyReadingStats
+}
+
+export async function saveReadingStats(stats: ReadingStats): Promise<void> {
+  const db = await getDB()
+  await db.put('stats', stats, 'global')
 }

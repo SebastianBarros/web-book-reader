@@ -7,6 +7,7 @@ import { setLastBookId } from '@/lib/storage'
 import { useFoliateView } from './hooks/useFoliateView'
 import { useReadingProgress } from './hooks/useReadingProgress'
 import { useLayoutSettings } from './hooks/useLayoutSettings'
+import { useReadingSpeed } from './hooks/useReadingSpeed'
 import { useToc } from './hooks/useToc'
 import { ReaderTopbar } from './components/ReaderTopbar'
 import { ReaderNav } from './components/ReaderNav'
@@ -57,6 +58,7 @@ export default function Reader() {
   )
 
   const progress = useReadingProgress(view, bookId)
+  const estimate = useReadingSpeed(view)
   const { settings, update } = useLayoutSettings(view)
   const tocItems = useToc(view)
 
@@ -71,6 +73,8 @@ export default function Reader() {
       <ReaderTopbar
         title={book?.title ?? 'Loading…'}
         percent={progress.percent}
+        estimate={estimate}
+        showEstimates={settings.showEstimates}
         onOpenToc={() => setTocOpen(true)}
         onOpenSettings={() => setSettingsOpen(true)}
       />

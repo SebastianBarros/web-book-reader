@@ -122,6 +122,24 @@ export function SettingsSheet({ open, onOpenChange, settings, onChange }: Settin
               </ToggleGroupItem>
             </ToggleGroup>
           </div>
+          <div className="flex items-center justify-between gap-4">
+            <div className="space-y-0.5">
+              <div className="text-sm font-medium">Show progress estimates</div>
+              <div className="text-xs text-muted-foreground">
+                Hide pages and time remaining for a distraction-free read.
+              </div>
+            </div>
+            <label className="relative inline-flex cursor-pointer items-center">
+              <input
+                type="checkbox"
+                className="peer sr-only"
+                checked={settings.showEstimates}
+                onChange={(e) => onChange({ showEstimates: e.target.checked })}
+              />
+              <span className="h-6 w-11 rounded-full bg-input transition-colors peer-checked:bg-primary" />
+              <span className="absolute left-1 top-1 h-4 w-4 rounded-full bg-background shadow transition-transform peer-checked:translate-x-5" />
+            </label>
+          </div>
           <div className="space-y-2">
             <div className="text-sm font-medium">Theme</div>
             <ToggleGroup

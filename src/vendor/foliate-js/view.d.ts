@@ -11,6 +11,7 @@ export class View extends HTMLElement {
   goRight(): Promise<void>
   next(): Promise<void>
   prev(): Promise<void>
+  getSectionFractions(): number[]
 }
 
 export function makeBook(file: Blob | File | string): Promise<FoliateBook>
@@ -43,12 +44,26 @@ export interface FoliateMetadata {
   [key: string]: unknown
 }
 
+export interface FoliateSection {
+  id?: string | number
+  linear?: string
+  size?: number
+  createDocument?: () => Promise<Document> | Document
+}
+
+export interface FoliateResolvedHref {
+  index: number
+  anchor: (doc: Document) => Element | Range | number | null | undefined
+}
+
 export interface FoliateBook {
   metadata?: FoliateMetadata
   toc?: FoliateTocItem[] | null
   getCover?: () => Promise<Blob | null> | Blob | null
-  sections: Array<{ id?: string; linear?: string }>
+  sections: FoliateSection[]
   dir?: string
+  splitTOCHref?: (href: string) => [string | number, string?] | null | undefined
+  resolveHref?: (href: string) => FoliateResolvedHref | null | undefined
 }
 
 export interface FoliateLocation {
