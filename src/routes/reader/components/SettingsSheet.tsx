@@ -1,8 +1,27 @@
-import { Sun, Moon, Coffee } from 'lucide-react'
+import { Sun, Moon, Coffee, BookOpen, BookCopy, ScrollText } from 'lucide-react'
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from '@/components/ui/sheet'
 import { Slider } from '@/components/ui/slider'
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
 import type { LayoutSettings } from '@/lib/db'
+import { FONT_OPTIONS, getFontOption } from '@/lib/fonts'
+
+type FlowMode = 'single' | 'spread' | 'scrolled'
+
+function flowMode(s: LayoutSettings): FlowMode {
+  if (s.flow === 'scrolled') return 'scrolled'
+  return s.maxColumns === 1 ? 'single' : 'spread'
+}
+
+function flowModeToPatch(mode: FlowMode): Partial<LayoutSettings> {
+  switch (mode) {
+    case 'single':
+      return { flow: 'paginated', maxColumns: 1 }
+    case 'spread':
+      return { flow: 'paginated', maxColumns: 2 }
+    case 'scrolled':
+      return { flow: 'scrolled' }
+  }
+}
 
 interface SettingsSheetProps {
   open: boolean
@@ -19,6 +38,29 @@ export function SettingsSheet({ open, onOpenChange, settings, onChange }: Settin
           <SheetTitle>Reading settings</SheetTitle>
         </SheetHeader>
         <div className="mt-6 flex flex-col gap-6">
+          <div className="space-y-2">
+            <div className="flex items-center justify-between">
+              <div className="text-sm font-medium">Font</div>
+              <div
+                className="text-xs text-muted-foreground"
+                style={{ fontFamily: getFontOption(settings.fontFamily).stack }}
+              >
+                Aa · The quick brown fox
+              </div>
+            </div>
+            <select
+              value={settings.fontFamily}
+              onChange={(e) => onChange({ fontFamily: e.target.value })}
+              className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+            >
+              {FONT_OPTIONS.map((f) => (
+                <option key={f.id} value={f.id} style={{ fontFamily: f.stack }}>
+                  {f.label}
+                  {f.description ? ` — ${f.description}` : ''}
+                </option>
+              ))}
+            </select>
+          </div>
           <SliderRow
             label="Font size"
             value={settings.fontSize}
@@ -55,6 +97,31 @@ export function SettingsSheet({ open, onOpenChange, settings, onChange }: Settin
             unit="px"
             onChange={(v) => onChange({ columnWidth: v })}
           />
+          <div className="space-y-2">
+            <div className="text-sm font-medium">Reading flow</div>
+            <ToggleGroup
+              type="single"
+              value={flowMode(settings)}
+              onValueChange={(value) => {
+                if (!value) return
+                onChange(flowModeToPatch(value as FlowMode))
+              }}
+              className="w-full"
+            >
+              <ToggleGroupItem value="single" className="flex-1 gap-2">
+                <BookOpen className="h-4 w-4" />
+                Single
+              </ToggleGroupItem>
+              <ToggleGroupItem value="spread" className="flex-1 gap-2">
+                <BookCopy className="h-4 w-4" />
+                Spread
+              </ToggleGroupItem>
+              <ToggleGroupItem value="scrolled" className="flex-1 gap-2">
+                <ScrollText className="h-4 w-4" />
+                Scroll
+              </ToggleGroupItem>
+            </ToggleGroup>
+          </div>
           <div className="space-y-2">
             <div className="text-sm font-medium">Theme</div>
             <ToggleGroup

@@ -21,6 +21,16 @@ export function useLayoutSettings(view: View | null) {
   }, [view, settings])
 
   useEffect(() => {
+    if (!view?.renderer) return
+    view.renderer.setAttribute('flow', settings.flow)
+  }, [view, settings.flow])
+
+  useEffect(() => {
+    if (!view?.renderer) return
+    view.renderer.setAttribute('max-column-count', String(settings.maxColumns))
+  }, [view, settings.maxColumns])
+
+  useEffect(() => {
     const root = document.documentElement
     root.classList.remove('dark', 'sepia')
     if (settings.theme !== 'light') root.classList.add(settings.theme)

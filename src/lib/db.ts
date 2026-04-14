@@ -24,6 +24,9 @@ export interface LayoutSettings {
   marginInline: number
   columnWidth: number
   theme: 'light' | 'dark' | 'sepia'
+  flow: 'paginated' | 'scrolled'
+  maxColumns: 1 | 2
+  fontFamily: string
 }
 
 export const defaultSettings: LayoutSettings = {
@@ -32,6 +35,9 @@ export const defaultSettings: LayoutSettings = {
   marginInline: 24,
   columnWidth: 720,
   theme: 'light',
+  flow: 'paginated',
+  maxColumns: 1,
+  fontFamily: 'Literata',
 }
 
 interface ReaderDB extends DBSchema {

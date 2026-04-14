@@ -1,5 +1,6 @@
 import { makeBook } from '@/vendor/foliate-js/view.js'
 import type { LayoutSettings } from './db'
+import { getFontOption, googleFontsImportUrl } from './fonts'
 
 type UnknownRecord = Record<string, unknown>
 
@@ -61,7 +62,9 @@ export function detectFormat(filename: string): string | null {
 
 export function buildContentCSS(settings: LayoutSettings): string {
   const themeColors = themeVars(settings.theme)
+  const font = getFontOption(settings.fontFamily)
   return `
+    @import url('${googleFontsImportUrl()}');
     @namespace epub "http://www.idpf.org/2007/ops";
     html {
       color-scheme: ${settings.theme === 'dark' ? 'dark' : 'light'};
@@ -69,6 +72,7 @@ export function buildContentCSS(settings: LayoutSettings): string {
       background: ${themeColors.bg};
     }
     body {
+      font-family: ${font.stack} !important;
       font-size: ${settings.fontSize}px !important;
       line-height: ${settings.lineHeight} !important;
       max-inline-size: ${settings.columnWidth}px;
@@ -76,7 +80,8 @@ export function buildContentCSS(settings: LayoutSettings): string {
       color: ${themeColors.fg};
       background: ${themeColors.bg};
     }
-    p, li, blockquote, div {
+    p, li, blockquote, div, span {
+      font-family: ${font.stack} !important;
       line-height: ${settings.lineHeight} !important;
     }
     a, a:visited {
@@ -88,9 +93,9 @@ export function buildContentCSS(settings: LayoutSettings): string {
 function themeVars(theme: LayoutSettings['theme']) {
   switch (theme) {
     case 'dark':
-      return { bg: '#111827', fg: '#e5e7eb', link: '#93c5fd' }
+      return { bg: '#111827', fg: '#ffffff', link: '#93c5fd' }
     case 'sepia':
-      return { bg: '#f5ecd7', fg: '#3a2e1f', link: '#7c5e2a' }
+      return { bg: '#f5ecd7', fg: '#1a1208', link: '#7c5e2a' }
     default:
       return { bg: '#ffffff', fg: '#111827', link: '#1d4ed8' }
   }
