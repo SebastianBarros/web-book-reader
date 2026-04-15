@@ -16,6 +16,7 @@ A drag-and-drop e-book reader that runs entirely in your browser. Open MOBI, EPU
 - **Time-remaining estimates.** Once you've read for ~60 cumulative seconds the top bar shows minutes remaining in the current chapter and in the whole book, calibrated to your own measured reading speed. Your reading speed persists across books and sessions, so reopening a book uses your calibrated rate immediately.
 - **Hide estimates on demand.** Toggle them off in Settings when progress indicators feel spoilery or anxiety-inducing; the rate keeps measuring silently so the estimate is ready the moment you flip it back on.
 - **Keyboard + click navigation.** Arrow keys, Space, PgUp/PgDn, or left/right click zones.
+- **Voice commands.** Toggle the mic in the top bar and say **"next"** or **"back"** to turn pages hands-free — useful for reading on a VR headset. Works in any Chromium-based browser (incl. Meta Quest Browser); needs microphone permission.
 - **Progress per book.** Every book remembers its own position; your reading-speed estimate is shared across the library.
 
 ## DRM

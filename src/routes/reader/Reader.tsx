@@ -9,6 +9,7 @@ import { useReadingProgress } from './hooks/useReadingProgress'
 import { useLayoutSettings } from './hooks/useLayoutSettings'
 import { useReadingSpeed } from './hooks/useReadingSpeed'
 import { useToc } from './hooks/useToc'
+import { useVoiceNav } from './hooks/useVoiceNav'
 import { ReaderTopbar } from './components/ReaderTopbar'
 import { ReaderNav } from './components/ReaderNav'
 import { TocSheet } from './components/TocSheet'
@@ -61,12 +62,20 @@ export default function Reader() {
   const estimate = useReadingSpeed(view)
   const { settings, update } = useLayoutSettings(view)
   const tocItems = useToc(view)
+  const voice = useVoiceNav(view, settings.voiceNavEnabled)
 
   useEffect(() => {
     if (error) {
       toast.error('Could not open this book (possibly DRM-protected or unsupported).')
     }
   }, [error])
+
+  useEffect(() => {
+    if (voice.status === 'denied') {
+      toast.error('Microphone permission denied. Voice commands disabled.')
+      update({ voiceNavEnabled: false })
+    }
+  }, [voice.status, update])
 
   return (
     <div className="flex h-screen flex-col bg-background">
@@ -75,6 +84,9 @@ export default function Reader() {
         percent={progress.percent}
         estimate={estimate}
         showEstimates={settings.showEstimates}
+        voice={voice}
+        voiceEnabled={settings.voiceNavEnabled}
+        onToggleVoice={() => update({ voiceNavEnabled: !settings.voiceNavEnabled })}
         onOpenToc={() => setTocOpen(true)}
         onOpenSettings={() => setSettingsOpen(true)}
       />

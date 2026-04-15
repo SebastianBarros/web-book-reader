@@ -97,10 +97,13 @@ The **convention**: each route owns its own `components/` and `hooks/` folders. 
 4. **`useLayoutSettings(view)`** loads `LayoutSettings` from IDB, applies them via `view.renderer.setStyles(css)`, `renderer.setAttribute('flow', …)`, and `renderer.setAttribute('max-column-count', …)`. It also toggles the `dark`/`sepia` class on `<html>` so the UI chrome follows the theme.
 5. **`useReadingSpeed(view)`** — see §6.
 6. **`useToc(view)`** flattens `view.book.toc` into a display-friendly list. Clicking a chapter calls `view.goTo(href)`.
+7. **`useVoiceNav(view, enabled)`** — see §6a.
 
 ### Navigation input
 
 [ReaderNav.tsx](src/routes/reader/components/ReaderNav.tsx) binds keyboard shortcuts (ArrowLeft/PageUp → `view.goLeft()`, ArrowRight/PageDown/Space → `view.goRight()`) and renders two absolutely-positioned transparent buttons on the left and right 15% of the reader surface for click/tap navigation. The book content itself lives inside foliate's iframe, which has its own click handlers for link navigation — we don't interfere with those.
+
+Voice commands plug into the same `view.goLeft()` / `view.goRight()` calls — see §6a.
 
 ## 5. IndexedDB schema
 
@@ -210,6 +213,33 @@ Computation is **async and deferred** — there's a brief window on book open wh
 
 Formatting is handled by `formatDuration(ms)`: `< 1 min`, `N min`, `Hh Mm`.
 
+## 6a. Voice navigation
+
+Located in [src/routes/reader/hooks/useVoiceNav.ts](src/routes/reader/hooks/useVoiceNav.ts). Lets the user say **"next"** or **"back"** to turn pages — primarily for hands-free reading on a VR headset (Meta Quest Browser is Chromium-based and supports the API). Free, no backend.
+
+### How
+
+- Uses the browser's **Web Speech Recognition API** (`window.SpeechRecognition` / `webkitSpeechRecognition`). Type declarations live in [src/types/speech-recognition.d.ts](src/types/speech-recognition.d.ts) since these APIs aren't in `lib.dom.d.ts` yet.
+- Configured with `continuous: true`, `interimResults: true`, `maxAlternatives: 3`. Interim results matter for latency: a single-word command lands within ~100–200 ms instead of waiting ~1 s for end-of-utterance silence. Multiple alternatives mean a slightly-mumbled word still triggers if the right keyword shows up in the recognizer's secondary guesses.
+- On each result event we iterate from `ev.resultIndex` and check every alternative for the keyword set — `next` → `view.goRight()`, `back` → `view.goLeft()`.
+- Browsers auto-terminate continuous recognition periodically; the `onend` handler restarts it as long as the user-visible toggle is still on.
+
+### The dedupe trick
+
+Interim results re-fire for the same utterance over its lifetime (multiple interim updates → final). A naive time-based debounce produced **2–3 page turns per "next"** because the recognizer kept re-emitting the matched transcript past the debounce window.
+
+The fix is to dedupe by **utterance index** rather than time. Each `i` in `SpeechRecognitionResultList` corresponds to one utterance; updates to that utterance (interim → final) keep the same `i`. The hook keeps `handledResultIndexRef` and skips any `i ≤ handled`. New utterances at higher indices still trigger normally. Reset on `onstart` so a recognition restart begins fresh.
+
+### Permissions and capability
+
+- The mic button in [ReaderTopbar.tsx](src/routes/reader/components/ReaderTopbar.tsx) is **only rendered if `SpeechRecognition` exists** on `window` — Firefox doesn't have it, so the toggle simply doesn't show there.
+- First toggle prompts the browser permission dialog. If the user denies, `onerror` fires with `not-allowed`; we toast and force-flip `voiceNavEnabled` back off so the icon state matches reality.
+- `LayoutSettings.voiceNavEnabled` (default `false`) persists the user's choice in IDB.
+
+### Privacy note
+
+Chromium routes recognition audio through Google's cloud — "free + no backend we run" is not the same as "fully offline." For two short keywords this is a reasonable tradeoff, but worth knowing.
+
 ## 7. Theming
 
 Three themes: `light`, `dark`, `sepia`. Two places to keep in sync:
@@ -276,6 +306,7 @@ To reuse under a different repo name or branch: edit the `base` in [vite.config.
 - **localStorage** — last-opened book id only.
 - **FileReader / Blob / File** — drag-drop, cover images via `URL.createObjectURL`.
 - **Shadow DOM / custom elements** — foliate-js uses a closed shadow root to host its iframe and paginator element.
+- **Web Speech Recognition API** — voice page-turn commands (see §6a). Capability-detected; absent in Firefox.
 
 ### Google Fonts
 
@@ -291,6 +322,7 @@ Loaded via a single `@import` at the top of the content CSS injected into the fo
 - **First-load font flash.** Reader content shows the fallback font briefly while Google Fonts loads inside the iframe; subsequent opens are cached.
 - **PDF explicitly disabled.** See §2.
 - **Mobile gestures.** Click zones and keyboard work, but no dedicated swipe handling.
+- **Voice nav is Chromium-only.** Firefox has no `SpeechRecognition`. The mic button hides itself when unsupported. Audio is routed through Google's cloud by Chromium for recognition.
 
 ## 12. Future work (not yet started)
 

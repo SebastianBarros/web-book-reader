@@ -28,6 +28,7 @@ export interface LayoutSettings {
   maxColumns: 1 | 2
   fontFamily: string
   showEstimates: boolean
+  voiceNavEnabled: boolean
 }
 
 export const defaultSettings: LayoutSettings = {
@@ -40,6 +41,7 @@ export const defaultSettings: LayoutSettings = {
   maxColumns: 1,
   fontFamily: 'Literata',
   showEstimates: true,
+  voiceNavEnabled: false,
 }
 
 export interface ReadingStats {
