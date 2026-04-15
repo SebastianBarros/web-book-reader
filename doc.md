@@ -73,6 +73,8 @@ src/
     fonts.ts                        # font registry + Google Fonts loader helper
     storage.ts                      # last-opened book id in localStorage
     utils.ts                        # cn() class-merge helper
+    ttsWorker.ts                    # Cloudflare Worker client (synthesize, listCloudVoices)
+    cloudVoices.ts                  # curated Google voice shortlist shown in the cloud picker
   vendor/
     foliate-js/                     # vendored upstream, PDF stubbed out
 ```
@@ -151,6 +153,12 @@ The schema migration in [src/lib/db.ts](src/lib/db.ts) is guarded by `oldVersion
   maxColumns: 1 | 2,
   fontFamily: string,
   showEstimates: boolean,
+  voiceNavEnabled: boolean,
+  ttsProvider: 'browser' | 'cloud',
+  ttsVoiceURI: string | null,   // used when ttsProvider === 'browser'
+  ttsCloudVoice: string,         // used when ttsProvider === 'cloud' (Google voice name)
+  ttsRate: number,
+  ttsPitch: number,              // only applied to the browser provider
 }
 ```
 
@@ -245,49 +253,98 @@ Chromium routes recognition audio through Google's cloud — "free + no backend 
 
 ## 6b. Audiobook mode (TTS)
 
-Located in [src/routes/reader/hooks/useTTS.ts](src/routes/reader/hooks/useTTS.ts) plus the voice-list helper at [src/routes/reader/hooks/useSpeechVoices.ts](src/routes/reader/hooks/useSpeechVoices.ts). Tier-A implementation per [audiobook-analysis.md](audiobook-analysis.md) — uses the browser's built-in `speechSynthesis`, no backend, no model download, no API keys.
+Located in [src/routes/reader/hooks/useTTS.ts](src/routes/reader/hooks/useTTS.ts) plus helpers [useSpeechVoices.ts](src/routes/reader/hooks/useSpeechVoices.ts), [src/lib/ttsWorker.ts](src/lib/ttsWorker.ts) (Cloudflare Worker client), and [src/lib/cloudVoices.ts](src/lib/cloudVoices.ts) (curated voice shortlist).
+
+Two **providers** live behind the same play/pause button. `LayoutSettings.ttsProvider` picks which is active; both drive the same foliate `TTS` class so the upstream plumbing (segmentation, click-to-jump, section-advance, cancel-on-user-nav) is shared.
+
+- **Cloud (default)** — uses Google Cloud Text-to-Speech Neural2 / Chirp-HD / Studio voices fetched through our own Cloudflare Worker at `https://web-book-reader-tts.sebastianbarros1995.workers.dev`. The Worker is a separate repo ([web-book-reader-tts](https://github.com/SebastianBarros/web-book-reader-tts)), proxies Google's API with the secret key held server-side, and gates access via an `ALLOWED_ORIGINS` check. Full setup + reference in [cloudflare-google-tts.md](cloudflare-google-tts.md). Free within 1M chars/month for the reader's typical use.
+- **Browser** — uses `window.speechSynthesis` with the OS's built-in voices. No network, but quality varies by OS. Good fallback when offline.
 
 ### What foliate gives us
 
-foliate-js ships a `TTS` class at [src/vendor/foliate-js/tts.js](src/vendor/foliate-js/tts.js) that does the hard work: `Intl.Segmenter`-based sentence/word segmentation, invisible `<foliate-mark>` elements inserted into the page DOM for position tracking, and a `highlight(range)` callback that foliate wires to `renderer.scrollToAnchor` for auto-page-turn. It emits **SSML strings** rather than audio, so it's synthesizer-agnostic.
+foliate-js ships a `TTS` class at [src/vendor/foliate-js/tts.js](src/vendor/foliate-js/tts.js) that does the hard work: `Intl.Segmenter`-based sentence/word segmentation, invisible `<foliate-mark>` elements inserted into a cloned fragment for position tracking, and a `highlight(range)` callback we pass to `view.initTTS(granularity, highlight)`. It emits **SSML strings** rather than audio, so it's synthesizer-agnostic. The API we drive: `start()`, `next()`, `resume()`, `from(range)`, `setMark(name)`.
 
-`view.initTTS(granularity, highlight)` (see [view.js:584](src/vendor/foliate-js/view.js#L584)) constructs it over the currently rendered section's doc and parks it at `view.tts`. The API we drive: `start()`, `next()`, `resume()`, `from(range)`, `setMark(name)`.
+### Shared parsing layer
 
-### The pipeline
+Both providers go through `parseSsml(ssml)` which returns `{ text, marks[] }`, where `marks[i] = { name, offset }` gives the character offset in the plain text at which each `<foliate-mark>` appears. Text nodes are concatenated, `<break>` elements emit `". "` to preserve pause prosody, and everything else is traversed for children. Modern neural voices infer prosody from punctuation well enough that dropping richer SSML is imperceptible.
 
-1. **Play** — `await view.initTTS('sentence')` if not already initialized for the current doc. Call `ssml = view.tts.from(view.lastLocation.range)` to start at the user's current visible position (rather than section start). Parse the SSML into `{ text, marks[] }`, where `marks[i] = { name, offset }` is the character position of each `<mark>` in the plain text we extracted.
-2. **Speak** — feed `text` to a `SpeechSynthesisUtterance` with the selected voice, rate, and pitch. Install listeners:
-   - `onstart` → `tts.setMark(marks[0].name)` so foliate scrolls/turns to the first word of this block.
-   - `onboundary` (word-level events from Web Speech) → map `ev.charIndex` to the **last mark whose offset ≤ charIndex** and call `setMark(name)`. This is what drives **auto-page-turn**: as the reader crosses into text on the next page, foliate's default highlight callback calls `scrollToAnchor`, and the paginator turns.
-   - `onend` → if still playing, advance: `next_ssml = view.tts.next()` and speak it. When `next()` returns `undefined`, the section is done; call `view.next()` to load the next spine section, wait a tick for the new doc to mount, re-init TTS, and call `start()` on the fresh section.
-   - `onerror` → ignore `'interrupted'` and `'canceled'` (those are our own pause path calling `speechSynthesis.cancel()`); surface anything else as an error.
-3. **Pause** — `speechSynthesis.cancel()`. Chromium's native `pause()` / `resume()` is unreliable, so we fully cancel and later call `tts.resume()` (which re-emits current-block SSML from the last mark) when the user hits play again.
-4. **Click-to-jump** — a click listener on the currently loaded section doc picks up clicks on block-level elements (`p, li, blockquote, h1–h6, dd, dt, pre, figcaption`), skips link clicks so foliate's own link handler wins, builds a `Range` over the clicked block, cancels current speech, and calls `tts.from(range)` to speak from there. This works whether TTS was idle, paused, or already playing.
-5. **Manual page-turn while playing** — the relocate handler in [Reader.tsx](src/routes/reader/Reader.tsx) forwards the `reason` to `tts.handleRelocate(reason)`. If reason is `'page'`, `'navigation'`, or `'selection'` we cancel TTS — *unless* the relocate was triggered by our own section-advance, which a `selfAdvancePendingRef` flag filters out.
+### Browser provider — serial
 
-### Voice / rate / pitch
+1. **Play** — `tts.from(view.lastLocation.range)` for the first block (start at user's current visible position), or `tts.resume()` for a resume-from-pause.
+2. **Speak** — create a `SpeechSynthesisUtterance(text)`, set voice / rate / pitch from the current options ref (so mid-playback setting changes take effect at the next block). Wire:
+   - `onstart` → `tts.setMark(marks[0].name)` (foliate scrolls to the first word).
+   - `onboundary` (word-level events) → `findMarkAt(marks, ev.charIndex)` → `tts.setMark(name)` (drives auto-page-turn as words cross page boundaries).
+   - `onend` → `tts.next()` + speak, or advance to the next spine section if the iterator is exhausted.
+   - `onerror` → ignore `'interrupted'`/`'canceled'` (our pause path), surface anything else.
+3. **Pause** — `speechSynthesis.cancel()` because Chromium's native `pause()`/`resume()` is unreliable; resume calls `tts.resume()` which re-emits the current block from the last mark.
 
-- `LayoutSettings.ttsVoiceURI` (nullable; `null` = browser default), `ttsRate` (0.5–2.0), `ttsPitch` (0.5–2.0) persist in IDB.
-- Voices load asynchronously: [useSpeechVoices.ts](src/routes/reader/hooks/useSpeechVoices.ts) listens for the `voiceschanged` event since `speechSynthesis.getVoices()` often returns `[]` on the first call.
-- Settings are read from a ref on **every new utterance**, so changes take effect at the next block boundary rather than mid-sentence.
-- The picker groups voices by language: the user's locale first, then "Other languages". `!v.localService` voices are labeled `(cloud)` (some browsers offer higher-quality neural voices that route through a cloud).
+### Cloud provider — prefetch queue
 
-### SSML stripping
+Cloud synthesis has network latency, so the cloud path keeps a sliding window of **5 blocks ahead**. Each queue item ([src/routes/reader/hooks/useTTS.ts](src/routes/reader/hooks/useTTS.ts) — `CloudQueueItem`) carries:
 
-Web Speech ignores most SSML, so we parse foliate's SSML output into plain text:
+```ts
+{
+  parsed,             // { text, marks[] }
+  aborter,            // AbortController for its fetch
+  fetchPromise,       // resolves to Blob | null
+  url,                // blob URL once fetch succeeds
+  disposed,           // true when the item is consumed / evicted
+  failed,             // true after retries exhausted
+  failureMessage,
+  firstRange,         // DOM Range of the block's first word (see "Highlight trick")
+}
+```
 
-- Text nodes are concatenated.
-- `<mark name="N">` elements are recorded at the current text length (so we can map back later) but emit no text.
-- `<break>` elements emit `". "` to preserve a natural pause without any real SSML support.
-- Everything else is traversed for its children.
+**Flow:**
 
-Modern neural voices infer prosody from punctuation well enough that dropping richer SSML features doesn't hurt audibly.
+1. **Play** clears any stale queue, calls `tts.from(currentRange)` (or `tts.start()` at section boundary) to get block 0's SSML, pushes it as `queue[0]` with a fetch started. `topUpCloudQueue()` then pulls blocks 1–4 via `tts.next()` and kicks their fetches in parallel.
+2. **`playCloudHead()`** awaits `queue[0].fetchPromise` (usually resolved — we started it ≥1 block ago), then plays its blob via a single persistent `<audio>` element.
+3. **`audio.onended`** shifts the head, revokes its blob URL, calls `topUpCloudQueue()` (which pulls block 5 and starts its fetch), then calls `playCloudHead()` again. The next block's audio is already fetched, so there's **zero gap**.
+4. **Section boundary** — when `tts.next()` returns `undefined`, `cloudSectionExhaustedRef` is set. Queue drains, `playCloudHead()` sees it, calls `advanceSection()` (shared with the browser path), re-inits TTS, primes from `tts.start()`.
+
+### The highlight trick
+
+The cloud path can't use foliate's `tts.setMark()` during playback. Reason: each call to `tts.next()` overwrites the TTS class's private `#ranges` map (it's a single shared Map — see [tts.js:214](src/vendor/foliate-js/tts.js#L214)). By the time block 0 actually starts playing, we've already prefetched blocks 1–4 and `#ranges` holds block 4's word positions. A `setMark('0')` call would then highlight block 4's first word instead of block 0's.
+
+The fix is to **capture each block's first-word Range at pull-time** while foliate's map still matches it. Right after `tts.next()` returns block N's SSML, we install a capture closure in `captureRangeRef`, fire `tts.setMark(marks[0].name)`, and intercept the range our custom highlight callback receives. We stash that Range on the queue item and use it later when block N actually plays — `view.renderer.scrollToAnchor(item.firstRange, true)` turns the page at the right moment.
+
+The custom highlight callback passed into `view.initTTS('sentence', highlight)` dispatches on whether a capture closure is currently installed: if yes, capture silently without scrolling; otherwise fall back to the default scroll. That keeps the browser provider (which relies on the default scroll via `setMark` on boundary events) working unchanged.
+
+### Retry and fail-stop
+
+Transient network errors are common. Each block's fetch goes through `synthesizeWithRetry` — up to **4 attempts** total with backoffs of **0.5 s, 2 s, 5 s**. The abort signal short-circuits the retry loop instantly on pause or navigation.
+
+If all retries fail, the queue item's `.failed` flag is set, and its `fetchPromise` resolves to `null` (we don't throw to the queue — that would kill the whole pipeline). The queue keeps fetching ahead: a failed block N does **not** stop prefetches for blocks N+1, N+2… because they might be unrelated to whatever broke.
+
+When `playCloudHead()` eventually reaches the failed head, it **stops playback** with `status = 'error'` and an error message that references the underlying failure. Reader surfaces this via a sonner toast. The user hits play again to retry — that path calls `tts.from(currentRange)` and rebuilds the queue from scratch.
+
+### Pause vs cancel
+
+- **Pause** (`pauseAudioOnly`) pauses the audio element only. The queue stays hot, in-flight fetches keep completing in the background, blob URLs stay alive. Resume is instant — `audio.play()` picks up from the same `currentTime`.
+- **Cancel** (`cancelEverything`) is used by stop, manual page-turn, and click-to-jump. Aborts every in-flight fetch, revokes every blob URL, clears the queue, resets the audio element.
+
+### Loading indicator
+
+`useTTS` exposes `loading: boolean`, flipped true whenever we're about to play a head whose audio hasn't landed yet. [Reader.tsx](src/routes/reader/Reader.tsx) renders a **floating pill** at the bottom-center of the reader viewport when that's true for ≥250 ms (so fast fetches don't flash it): spinner + "Waiting for next paragraph…". The top-bar play/pause button also swaps to a spinner in-place so the control feedback matches. Delay prevents UI flash on the common case where block N's audio is already queued before block N−1 finishes.
+
+### Click-to-jump
+
+A click listener on the loaded section doc watches for clicks on block-level elements (`p, li, blockquote, h1–h6, dd, dt, pre, figcaption`), skips link clicks (foliate handles those), builds a `Range` over the clicked block, cancels the current queue, and primes a fresh queue from `tts.from(range)`. Works for both providers.
+
+### Voice / rate / pitch settings
+
+- `ttsCloudVoice` picks from a curated shortlist in [cloudVoices.ts](src/lib/cloudVoices.ts) — four Google voices chosen by ear for Spanish audiobook quality: `es-US-Chirp-HD-F` (default), `es-US-Chirp-HD-D`, `es-ES-Chirp-HD-F`, `es-ES-Neural2-G`. The worker exposes `GET /voices?languageCode=…` if we ever want to show the full catalog.
+- `ttsVoiceURI` is the browser provider's selected voice; [useSpeechVoices.ts](src/routes/reader/hooks/useSpeechVoices.ts) lists voices reactively (listens for the `voiceschanged` event since `getVoices()` often returns `[]` on first call). Grouped by language, user's locale first.
+- `ttsRate` (0.5–2.0) applies to both providers — for cloud it's sent to Google as `speakingRate`; for browser it's set on the utterance.
+- `ttsPitch` (0.5–2.0) only applies to the browser provider (Google uses a different pitch scale; we don't expose it to keep the UI simple).
+- Options are read from a ref on every new utterance / block, so changes take effect at the next block boundary rather than mid-sentence.
 
 ### Known quirks
 
-- **Chrome pauses `speechSynthesis` when the tab is backgrounded** on some platforms. We don't fight this — documented and move on.
-- **Voices load asynchronously.** First paint may show "Loading…" in the voice picker until `voiceschanged` fires.
-- **Quest 3 Browser.** Chromium-based, has working `speechSynthesis`, and page-turn handoff works there; voice quality depends on the system voice bundled with the headset OS.
+- **Chrome pauses `speechSynthesis` when the tab is backgrounded** on some platforms (browser provider only). Not fought.
+- **First block always has some latency** (fetch time, ~200–700 ms) — unavoidable, we can't prefetch what we don't have yet. Subsequent blocks should feel instant.
+- **Voices load asynchronously** for browser provider; picker may show "Loading…" briefly.
+- **Quest 3 Browser.** Chromium-based; cloud provider and click-to-jump both work. Browser provider quality depends on the headset OS's bundled voice.
 
 ## 7. Theming
 
@@ -347,11 +404,24 @@ To reuse under a different repo name or branch: edit the `base` in [vite.config.
 | `view.renderer.setStyles(css)`                   | Inject user CSS into the content iframe                                                                  |
 | `view.renderer.setAttribute('flow', …)`          | Toggle paginated vs scrolled                                                                             |
 | `view.renderer.setAttribute('max-column-count')` | Single-page vs two-page spread                                                                           |
-| `view.initTTS(granularity, highlight)`           | Constructs a foliate `TTS` instance over the current section's DOM (see §6b)                             |
+| `view.initTTS(granularity, highlight)`           | Constructs a foliate `TTS` instance over the current section's DOM (see §6b). We pass a custom highlight callback that supports a capture mode used at prefetch-time |
 | `view.tts.from(range)` / `start()` / `next()` / `resume()` / `setMark(name)` | Drive audiobook playback (see §6b)                                                     |
 | `view.lastLocation.range`                        | Current visible range — fed to `tts.from()` so TTS starts at the reader's position                       |
+| `view.renderer.scrollToAnchor(range, smooth)`    | Turn the paginator to a given Range. Cloud provider calls it directly with per-block `firstRange` captured at prefetch (see §6b "Highlight trick") |
 | `load` event                                     | Fires with `{ doc, index }` each time foliate mounts a section DOM; we use it to attach the click-to-jump handler |
 | `relocate` event                                 | Fires on every page turn; payload drives progress saves, time estimates, and TTS cancel-on-user-nav      |
+
+### Cloudflare Worker endpoints
+
+Hosted at `https://web-book-reader-tts.sebastianbarros1995.workers.dev` ([repo](https://github.com/SebastianBarros/web-book-reader-tts)):
+
+| Endpoint                                    | Purpose                                                                         |
+| ------------------------------------------- | ------------------------------------------------------------------------------- |
+| `POST /tts` `{ text, voice?, rate?, pitch? }` | Returns `audio/mpeg`. Max 5000 chars per call. Rate/pitch clamped server-side. |
+| `GET /voices?languageCode=es-ES`            | Proxies Google's voice catalog, filtered by language code if provided.          |
+| `GET /`                                     | Plain-text liveness check.                                                      |
+
+The Worker holds the Google API key as an encrypted secret and gates requests via an `ALLOWED_ORIGINS` check. Full setup/architecture lives in [cloudflare-google-tts.md](cloudflare-google-tts.md).
 
 ### Browser APIs
 
@@ -377,8 +447,11 @@ Loaded via a single `@import` at the top of the content CSS injected into the fo
 - **PDF explicitly disabled.** See §2.
 - **Mobile gestures.** Click zones and keyboard work, but no dedicated swipe handling.
 - **Voice nav is Chromium-only.** Firefox has no `SpeechRecognition`. The mic button hides itself when unsupported. Audio is routed through Google's cloud by Chromium for recognition.
-- **Audiobook voice quality is OS-dependent.** Web Speech uses whatever voices the OS provides; Windows/Mac/iOS/Android neural voices are good, stock Linux Chrome falls back to a robotic eSpeak voice. Users can pick a better voice in Settings if one is available.
-- **Chromium pauses `speechSynthesis` when the tab is backgrounded** on some platforms — not something we fight.
+- **Audiobook browser-provider quality is OS-dependent.** When using the Browser TTS provider, quality depends on the OS's built-in voices. This is why the default provider is Cloud (Google).
+- **Cloud TTS requires internet.** Obvious but worth noting: the default audiobook provider is the Cloudflare + Google TTS pipeline. Offline sessions need the Browser provider toggled on in Settings.
+- **Google TTS free tier.** 1M chars/month Neural2 covers ~2.5 novels. A single personal user won't hit this; if the worker were ever opened to more users, the $1 budget alert would warn first.
+- **No per-word highlight in cloud mode.** Google returns a single MP3 per block without time-points by default; we scroll per block, not per word. Fine for paragraph-sized blocks.
+- **Chromium pauses `speechSynthesis` when the tab is backgrounded** on some platforms — not something we fight. Browser provider only; cloud provider's `<audio>` element keeps playing.
 
 ## 12. Future work (not yet started)
 

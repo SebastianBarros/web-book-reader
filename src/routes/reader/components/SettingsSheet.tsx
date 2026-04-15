@@ -1,9 +1,10 @@
-import { Sun, Moon, Coffee, BookOpen, BookCopy, ScrollText } from 'lucide-react'
+import { Sun, Moon, Coffee, BookOpen, BookCopy, ScrollText, Cloud, HardDrive } from 'lucide-react'
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from '@/components/ui/sheet'
 import { Slider } from '@/components/ui/slider'
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
-import type { LayoutSettings } from '@/lib/db'
+import type { LayoutSettings, TTSProvider } from '@/lib/db'
 import { FONT_OPTIONS, getFontOption } from '@/lib/fonts'
+import { FEATURED_VOICES } from '@/lib/cloudVoices'
 import { useSpeechVoices, type BrowserVoice } from '../hooks/useSpeechVoices'
 
 type FlowMode = 'single' | 'spread' | 'scrolled'
@@ -182,47 +183,40 @@ interface AudiobookRowsProps {
 }
 
 function AudiobookRows({ voices, settings, onChange }: AudiobookRowsProps) {
-  const pageLang = document.documentElement.lang || navigator.language || 'en'
-  const pageLangPrefix = pageLang.slice(0, 2).toLowerCase()
-  const sameLang = voices.filter((v) => v.lang.toLowerCase().startsWith(pageLangPrefix))
-  const others = voices.filter((v) => !v.lang.toLowerCase().startsWith(pageLangPrefix))
-
   return (
     <>
       <div className="space-y-2 border-t pt-4">
-        <div className="flex items-center justify-between">
-          <div className="text-sm font-medium">Audiobook voice</div>
-          <div className="text-xs text-muted-foreground">
-            {voices.length === 0 ? 'Loading…' : `${voices.length} available`}
-          </div>
-        </div>
-        <select
-          value={settings.ttsVoiceURI ?? ''}
-          onChange={(e) => onChange({ ttsVoiceURI: e.target.value || null })}
-          className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+        <div className="text-sm font-medium">Audiobook voice provider</div>
+        <ToggleGroup
+          type="single"
+          value={settings.ttsProvider}
+          onValueChange={(value) => {
+            if (value) onChange({ ttsProvider: value as TTSProvider })
+          }}
+          className="w-full"
         >
-          <option value="">System default</option>
-          {sameLang.length > 0 && (
-            <optgroup label={`Your language (${pageLangPrefix})`}>
-              {sameLang.map((v) => (
-                <option key={v.voiceURI} value={v.voiceURI}>
-                  {v.name} — {v.lang}
-                  {v.localService ? '' : ' (cloud)'}
-                </option>
-              ))}
-            </optgroup>
-          )}
-          {others.length > 0 && (
-            <optgroup label="Other languages">
-              {others.map((v) => (
-                <option key={v.voiceURI} value={v.voiceURI}>
-                  {v.name} — {v.lang}
-                </option>
-              ))}
-            </optgroup>
-          )}
-        </select>
+          <ToggleGroupItem value="cloud" className="flex-1 gap-2">
+            <Cloud className="h-4 w-4" />
+            Cloud (Google)
+          </ToggleGroupItem>
+          <ToggleGroupItem value="browser" className="flex-1 gap-2">
+            <HardDrive className="h-4 w-4" />
+            Browser
+          </ToggleGroupItem>
+        </ToggleGroup>
+        <div className="text-xs text-muted-foreground">
+          {settings.ttsProvider === 'cloud'
+            ? 'Google Cloud TTS via our worker. Great quality, needs internet.'
+            : 'Your OS / browser voices. Offline, quality depends on the device.'}
+        </div>
       </div>
+
+      {settings.ttsProvider === 'cloud' ? (
+        <CloudVoicePicker settings={settings} onChange={onChange} />
+      ) : (
+        <BrowserVoicePicker voices={voices} settings={settings} onChange={onChange} />
+      )}
+
       <SliderRow
         label="Speech rate"
         value={settings.ttsRate}
@@ -232,16 +226,95 @@ function AudiobookRows({ voices, settings, onChange }: AudiobookRowsProps) {
         fmt={(v) => `${v.toFixed(2)}×`}
         onChange={(v) => onChange({ ttsRate: v })}
       />
-      <SliderRow
-        label="Speech pitch"
-        value={settings.ttsPitch}
-        min={0.5}
-        max={2.0}
-        step={0.05}
-        fmt={(v) => v.toFixed(2)}
-        onChange={(v) => onChange({ ttsPitch: v })}
-      />
+      {settings.ttsProvider === 'browser' && (
+        <SliderRow
+          label="Speech pitch"
+          value={settings.ttsPitch}
+          min={0.5}
+          max={2.0}
+          step={0.05}
+          fmt={(v) => v.toFixed(2)}
+          onChange={(v) => onChange({ ttsPitch: v })}
+        />
+      )}
     </>
+  )
+}
+
+interface CloudVoicePickerProps {
+  settings: LayoutSettings
+  onChange: (patch: Partial<LayoutSettings>) => void
+}
+
+function CloudVoicePicker({ settings, onChange }: CloudVoicePickerProps) {
+  return (
+    <div className="space-y-2">
+      <div className="flex items-center justify-between">
+        <div className="text-sm font-medium">Cloud voice</div>
+        <div className="text-xs text-muted-foreground">Spanish picks</div>
+      </div>
+      <select
+        value={settings.ttsCloudVoice}
+        onChange={(e) => onChange({ ttsCloudVoice: e.target.value })}
+        className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+      >
+        {FEATURED_VOICES.map((v) => (
+          <option key={v.id} value={v.id}>
+            {v.label} — {v.note}
+          </option>
+        ))}
+      </select>
+    </div>
+  )
+}
+
+interface BrowserVoicePickerProps {
+  voices: BrowserVoice[]
+  settings: LayoutSettings
+  onChange: (patch: Partial<LayoutSettings>) => void
+}
+
+function BrowserVoicePicker({ voices, settings, onChange }: BrowserVoicePickerProps) {
+  const pageLang = document.documentElement.lang || navigator.language || 'en'
+  const pageLangPrefix = pageLang.slice(0, 2).toLowerCase()
+  const sameLang = voices.filter((v) => v.lang.toLowerCase().startsWith(pageLangPrefix))
+  const others = voices.filter((v) => !v.lang.toLowerCase().startsWith(pageLangPrefix))
+
+  return (
+    <div className="space-y-2">
+      <div className="flex items-center justify-between">
+        <div className="text-sm font-medium">Browser voice</div>
+        <div className="text-xs text-muted-foreground">
+          {voices.length === 0 ? 'Loading…' : `${voices.length} available`}
+        </div>
+      </div>
+      <select
+        value={settings.ttsVoiceURI ?? ''}
+        onChange={(e) => onChange({ ttsVoiceURI: e.target.value || null })}
+        className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+      >
+        <option value="">System default</option>
+        {sameLang.length > 0 && (
+          <optgroup label={`Your language (${pageLangPrefix})`}>
+            {sameLang.map((v) => (
+              <option key={v.voiceURI} value={v.voiceURI}>
+                {v.name} — {v.lang}
+                {v.localService ? '' : ' (cloud)'}
+              </option>
+            ))}
+          </optgroup>
+        )}
+        {others.length > 0 && (
+          <optgroup label="Other languages">
+            {others.map((v) => (
+              <option key={v.voiceURI} value={v.voiceURI}>
+                {v.name} — {v.lang}
+              </option>
+            ))}
+          </optgroup>
+        )}
+      </select>
+    </div>
   )
 }
 

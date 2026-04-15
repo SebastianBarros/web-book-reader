@@ -18,6 +18,8 @@ export interface ProgressRecord {
   updatedAt: number
 }
 
+export type TTSProvider = 'browser' | 'cloud'
+
 export interface LayoutSettings {
   fontSize: number
   lineHeight: number
@@ -29,7 +31,9 @@ export interface LayoutSettings {
   fontFamily: string
   showEstimates: boolean
   voiceNavEnabled: boolean
+  ttsProvider: TTSProvider
   ttsVoiceURI: string | null
+  ttsCloudVoice: string
   ttsRate: number
   ttsPitch: number
 }
@@ -45,7 +49,9 @@ export const defaultSettings: LayoutSettings = {
   fontFamily: 'Literata',
   showEstimates: true,
   voiceNavEnabled: false,
+  ttsProvider: 'cloud',
   ttsVoiceURI: null,
+  ttsCloudVoice: 'es-US-Chirp-HD-F',
   ttsRate: 1.0,
   ttsPitch: 1.0,
 }

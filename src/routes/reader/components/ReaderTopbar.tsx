@@ -3,6 +3,7 @@ import {
   ArrowLeft,
   Headphones,
   ListOrdered,
+  Loader2,
   Mic,
   MicOff,
   Pause,
@@ -90,9 +91,14 @@ export function ReaderTopbar({
                 onClick={tts.toggle}
                 aria-label={tts.status === 'playing' ? 'Pause audiobook' : 'Play audiobook'}
                 aria-pressed={tts.status === 'playing'}
-                className={cn(tts.status === 'playing' && 'text-primary')}
+                className={cn(
+                  tts.status === 'playing' && 'text-primary',
+                  tts.loading && 'text-primary',
+                )}
               >
-                {tts.status === 'playing' ? (
+                {tts.loading ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : tts.status === 'playing' ? (
                   <Pause className="h-4 w-4" />
                 ) : tts.status === 'paused' ? (
                   <Headphones className="h-4 w-4" />
@@ -104,11 +110,13 @@ export function ReaderTopbar({
             <TooltipContent side="bottom">
               {tts.status === 'error'
                 ? (tts.errorMessage ?? 'Speech error')
-                : tts.status === 'playing'
-                  ? 'Pause audiobook'
-                  : tts.status === 'paused'
-                    ? 'Resume audiobook'
-                    : 'Play audiobook'}
+                : tts.loading
+                  ? 'Fetching audio…'
+                  : tts.status === 'playing'
+                    ? 'Pause audiobook'
+                    : tts.status === 'paused'
+                      ? 'Resume audiobook'
+                      : 'Play audiobook'}
             </TooltipContent>
           </Tooltip>
         </TooltipProvider>

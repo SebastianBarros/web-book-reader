@@ -36,6 +36,7 @@ export interface FoliateRenderer extends HTMLElement {
   next(): Promise<void>
   prev(): Promise<void>
   getContents?: () => Array<{ doc: Document; index: number }>
+  scrollToAnchor?: (anchor: Range | Element | number, smooth?: boolean) => void
 }
 
 export interface FoliateTocItem {

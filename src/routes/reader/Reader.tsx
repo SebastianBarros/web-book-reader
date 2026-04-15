@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import { toast } from 'sonner'
+import { Loader2 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { getBook, getProgress, type BookRecord } from '@/lib/db'
 import { setLastBookId } from '@/lib/storage'
@@ -65,7 +66,9 @@ export default function Reader() {
   const tocItems = useToc(view)
   const voice = useVoiceNav(view, settings.voiceNavEnabled)
   const tts = useTTS(view, {
+    provider: settings.ttsProvider,
     voiceURI: settings.ttsVoiceURI,
+    cloudVoice: settings.ttsCloudVoice,
     rate: settings.ttsRate,
     pitch: settings.ttsPitch,
   })
@@ -92,6 +95,24 @@ export default function Reader() {
     view.addEventListener('relocate', onRelocate)
     return () => view.removeEventListener('relocate', onRelocate)
   }, [view, tts])
+
+  // Delay the loading pill so quick (cached) fetches don't flash it.
+  const [showLoadingPill, setShowLoadingPill] = useState(false)
+  useEffect(() => {
+    if (!tts.loading) {
+      setShowLoadingPill(false)
+      return
+    }
+    const t = window.setTimeout(() => setShowLoadingPill(true), 250)
+    return () => window.clearTimeout(t)
+  }, [tts.loading])
+
+  // Surface audiobook errors (e.g. all retries exhausted on a paragraph).
+  useEffect(() => {
+    if (tts.status === 'error' && tts.errorMessage) {
+      toast.error(tts.errorMessage)
+    }
+  }, [tts.status, tts.errorMessage])
 
   return (
     <div className="flex h-screen flex-col bg-background">
@@ -125,6 +146,18 @@ export default function Reader() {
           </div>
         )}
         <ReaderNav view={view} />
+        {showLoadingPill && (
+          <div
+            role="status"
+            aria-live="polite"
+            className="pointer-events-none absolute bottom-6 left-1/2 z-40 -translate-x-1/2"
+          >
+            <div className="flex items-center gap-2 rounded-full border bg-background/95 px-4 py-2 text-sm shadow-lg backdrop-blur">
+              <Loader2 className="h-4 w-4 animate-spin text-primary" />
+              <span>Waiting for next paragraph…</span>
+            </div>
+          </div>
+        )}
       </main>
 
       <TocSheet
