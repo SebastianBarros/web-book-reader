@@ -17,6 +17,7 @@ A drag-and-drop e-book reader that runs entirely in your browser. Open MOBI, EPU
 - **Hide estimates on demand.** Toggle them off in Settings when progress indicators feel spoilery or anxiety-inducing; the rate keeps measuring silently so the estimate is ready the moment you flip it back on.
 - **Keyboard + click navigation.** Arrow keys, Space, PgUp/PgDn, or left/right click zones.
 - **Voice commands.** Toggle the mic in the top bar and say **"next"** or **"back"** to turn pages hands-free — useful for reading on a VR headset. Works in any Chromium-based browser (incl. Meta Quest Browser); needs microphone permission.
+- **Audiobook mode.** Press the play icon in the top bar and the book is read aloud using your browser's built-in neural voices. Auto-turns pages and advances across chapters. Tap any paragraph to start reading from there. Voice, rate, and pitch are configurable in Settings. No backend, no API keys.
 - **Progress per book.** Every book remembers its own position; your reading-speed estimate is shared across the library.
 
 ## DRM

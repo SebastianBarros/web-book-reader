@@ -2,6 +2,7 @@ export class View extends HTMLElement {
   book: FoliateBook
   renderer: FoliateRenderer
   lastLocation: FoliateLocation | null
+  tts?: FoliateTTS
   open(file: Blob | File | string): Promise<void>
   close(): void
   init(opts: { lastLocation?: string | null; showTextStart?: boolean }): Promise<void>
@@ -12,6 +13,20 @@ export class View extends HTMLElement {
   next(): Promise<void>
   prev(): Promise<void>
   getSectionFractions(): number[]
+  initTTS(
+    granularity?: 'word' | 'sentence' | 'grapheme',
+    highlight?: (range: Range) => void,
+  ): Promise<void>
+}
+
+export interface FoliateTTS {
+  doc: Document
+  start(): string | undefined
+  resume(): string | undefined
+  next(paused?: boolean): string | undefined
+  prev(paused?: boolean): string | undefined
+  from(range: Range): string | undefined
+  setMark(mark: string): void
 }
 
 export function makeBook(file: Blob | File | string): Promise<FoliateBook>
@@ -20,6 +35,7 @@ export interface FoliateRenderer extends HTMLElement {
   setStyles?: (css: string) => void
   next(): Promise<void>
   prev(): Promise<void>
+  getContents?: () => Array<{ doc: Document; index: number }>
 }
 
 export interface FoliateTocItem {

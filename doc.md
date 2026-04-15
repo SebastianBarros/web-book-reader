@@ -51,16 +51,19 @@ src/
     reader/                         # Reader screen, colocated components + hooks
       Reader.tsx                    # thin shell wiring hooks together
       components/
-        ReaderTopbar.tsx            # title, progress, time estimates, toc/settings buttons
+        ReaderTopbar.tsx            # title, progress, time estimates, mic + play/pause, toc/settings buttons
         ReaderNav.tsx               # keyboard + click zones for page turns
         TocSheet.tsx                # chapter navigation (flat TOC, current highlighted)
-        SettingsSheet.tsx           # flow, font, size, line-height, margins, theme
+        SettingsSheet.tsx           # flow, font, size, line-height, margins, theme, voice, rate, pitch
       hooks/
         useFoliateView.ts           # mounts/tears down <foliate-view>
         useReadingProgress.ts       # listens to relocate, debounced progress save
         useLayoutSettings.ts        # loads/applies/saves layout preferences
         useReadingSpeed.ts          # measures reading rate, produces time estimates
         useToc.ts                   # flattens book.toc into a renderable list
+        useVoiceNav.ts              # "next" / "back" voice commands (SpeechRecognition)
+        useTTS.ts                   # audiobook playback (SpeechSynthesis + foliate TTS)
+        useSpeechVoices.ts          # reactive list of browser TTS voices
   components/
     DropZone.tsx                    # shared drag-drop surface (used only by Library today)
     ui/                             # shadcn primitives: button, card, sheet, slider, toggle-group, tooltip
@@ -240,6 +243,52 @@ The fix is to dedupe by **utterance index** rather than time. Each `i` in `Speec
 
 Chromium routes recognition audio through Google's cloud — "free + no backend we run" is not the same as "fully offline." For two short keywords this is a reasonable tradeoff, but worth knowing.
 
+## 6b. Audiobook mode (TTS)
+
+Located in [src/routes/reader/hooks/useTTS.ts](src/routes/reader/hooks/useTTS.ts) plus the voice-list helper at [src/routes/reader/hooks/useSpeechVoices.ts](src/routes/reader/hooks/useSpeechVoices.ts). Tier-A implementation per [audiobook-analysis.md](audiobook-analysis.md) — uses the browser's built-in `speechSynthesis`, no backend, no model download, no API keys.
+
+### What foliate gives us
+
+foliate-js ships a `TTS` class at [src/vendor/foliate-js/tts.js](src/vendor/foliate-js/tts.js) that does the hard work: `Intl.Segmenter`-based sentence/word segmentation, invisible `<foliate-mark>` elements inserted into the page DOM for position tracking, and a `highlight(range)` callback that foliate wires to `renderer.scrollToAnchor` for auto-page-turn. It emits **SSML strings** rather than audio, so it's synthesizer-agnostic.
+
+`view.initTTS(granularity, highlight)` (see [view.js:584](src/vendor/foliate-js/view.js#L584)) constructs it over the currently rendered section's doc and parks it at `view.tts`. The API we drive: `start()`, `next()`, `resume()`, `from(range)`, `setMark(name)`.
+
+### The pipeline
+
+1. **Play** — `await view.initTTS('sentence')` if not already initialized for the current doc. Call `ssml = view.tts.from(view.lastLocation.range)` to start at the user's current visible position (rather than section start). Parse the SSML into `{ text, marks[] }`, where `marks[i] = { name, offset }` is the character position of each `<mark>` in the plain text we extracted.
+2. **Speak** — feed `text` to a `SpeechSynthesisUtterance` with the selected voice, rate, and pitch. Install listeners:
+   - `onstart` → `tts.setMark(marks[0].name)` so foliate scrolls/turns to the first word of this block.
+   - `onboundary` (word-level events from Web Speech) → map `ev.charIndex` to the **last mark whose offset ≤ charIndex** and call `setMark(name)`. This is what drives **auto-page-turn**: as the reader crosses into text on the next page, foliate's default highlight callback calls `scrollToAnchor`, and the paginator turns.
+   - `onend` → if still playing, advance: `next_ssml = view.tts.next()` and speak it. When `next()` returns `undefined`, the section is done; call `view.next()` to load the next spine section, wait a tick for the new doc to mount, re-init TTS, and call `start()` on the fresh section.
+   - `onerror` → ignore `'interrupted'` and `'canceled'` (those are our own pause path calling `speechSynthesis.cancel()`); surface anything else as an error.
+3. **Pause** — `speechSynthesis.cancel()`. Chromium's native `pause()` / `resume()` is unreliable, so we fully cancel and later call `tts.resume()` (which re-emits current-block SSML from the last mark) when the user hits play again.
+4. **Click-to-jump** — a click listener on the currently loaded section doc picks up clicks on block-level elements (`p, li, blockquote, h1–h6, dd, dt, pre, figcaption`), skips link clicks so foliate's own link handler wins, builds a `Range` over the clicked block, cancels current speech, and calls `tts.from(range)` to speak from there. This works whether TTS was idle, paused, or already playing.
+5. **Manual page-turn while playing** — the relocate handler in [Reader.tsx](src/routes/reader/Reader.tsx) forwards the `reason` to `tts.handleRelocate(reason)`. If reason is `'page'`, `'navigation'`, or `'selection'` we cancel TTS — *unless* the relocate was triggered by our own section-advance, which a `selfAdvancePendingRef` flag filters out.
+
+### Voice / rate / pitch
+
+- `LayoutSettings.ttsVoiceURI` (nullable; `null` = browser default), `ttsRate` (0.5–2.0), `ttsPitch` (0.5–2.0) persist in IDB.
+- Voices load asynchronously: [useSpeechVoices.ts](src/routes/reader/hooks/useSpeechVoices.ts) listens for the `voiceschanged` event since `speechSynthesis.getVoices()` often returns `[]` on the first call.
+- Settings are read from a ref on **every new utterance**, so changes take effect at the next block boundary rather than mid-sentence.
+- The picker groups voices by language: the user's locale first, then "Other languages". `!v.localService` voices are labeled `(cloud)` (some browsers offer higher-quality neural voices that route through a cloud).
+
+### SSML stripping
+
+Web Speech ignores most SSML, so we parse foliate's SSML output into plain text:
+
+- Text nodes are concatenated.
+- `<mark name="N">` elements are recorded at the current text length (so we can map back later) but emit no text.
+- `<break>` elements emit `". "` to preserve a natural pause without any real SSML support.
+- Everything else is traversed for its children.
+
+Modern neural voices infer prosody from punctuation well enough that dropping richer SSML features doesn't hurt audibly.
+
+### Known quirks
+
+- **Chrome pauses `speechSynthesis` when the tab is backgrounded** on some platforms. We don't fight this — documented and move on.
+- **Voices load asynchronously.** First paint may show "Loading…" in the voice picker until `voiceschanged` fires.
+- **Quest 3 Browser.** Chromium-based, has working `speechSynthesis`, and page-turn handoff works there; voice quality depends on the system voice bundled with the headset OS.
+
 ## 7. Theming
 
 Three themes: `light`, `dark`, `sepia`. Two places to keep in sync:
@@ -298,7 +347,11 @@ To reuse under a different repo name or branch: edit the `base` in [vite.config.
 | `view.renderer.setStyles(css)`                   | Inject user CSS into the content iframe                                                                  |
 | `view.renderer.setAttribute('flow', …)`          | Toggle paginated vs scrolled                                                                             |
 | `view.renderer.setAttribute('max-column-count')` | Single-page vs two-page spread                                                                           |
-| `relocate` event                                 | Fires on every page turn; payload drives progress saves and time estimates                               |
+| `view.initTTS(granularity, highlight)`           | Constructs a foliate `TTS` instance over the current section's DOM (see §6b)                             |
+| `view.tts.from(range)` / `start()` / `next()` / `resume()` / `setMark(name)` | Drive audiobook playback (see §6b)                                                     |
+| `view.lastLocation.range`                        | Current visible range — fed to `tts.from()` so TTS starts at the reader's position                       |
+| `load` event                                     | Fires with `{ doc, index }` each time foliate mounts a section DOM; we use it to attach the click-to-jump handler |
+| `relocate` event                                 | Fires on every page turn; payload drives progress saves, time estimates, and TTS cancel-on-user-nav      |
 
 ### Browser APIs
 
@@ -307,6 +360,7 @@ To reuse under a different repo name or branch: edit the `base` in [vite.config.
 - **FileReader / Blob / File** — drag-drop, cover images via `URL.createObjectURL`.
 - **Shadow DOM / custom elements** — foliate-js uses a closed shadow root to host its iframe and paginator element.
 - **Web Speech Recognition API** — voice page-turn commands (see §6a). Capability-detected; absent in Firefox.
+- **Web Speech Synthesis API** (`window.speechSynthesis`, `SpeechSynthesisUtterance`) — audiobook playback (see §6b). Word-boundary events (`onboundary`) drive auto-page-turn; `voiceschanged` event drives the async voice picker.
 
 ### Google Fonts
 
@@ -323,6 +377,8 @@ Loaded via a single `@import` at the top of the content CSS injected into the fo
 - **PDF explicitly disabled.** See §2.
 - **Mobile gestures.** Click zones and keyboard work, but no dedicated swipe handling.
 - **Voice nav is Chromium-only.** Firefox has no `SpeechRecognition`. The mic button hides itself when unsupported. Audio is routed through Google's cloud by Chromium for recognition.
+- **Audiobook voice quality is OS-dependent.** Web Speech uses whatever voices the OS provides; Windows/Mac/iOS/Android neural voices are good, stock Linux Chrome falls back to a robotic eSpeak voice. Users can pick a better voice in Settings if one is available.
+- **Chromium pauses `speechSynthesis` when the tab is backgrounded** on some platforms — not something we fight.
 
 ## 12. Future work (not yet started)
 

@@ -1,10 +1,20 @@
 import { Link } from 'react-router-dom'
-import { ArrowLeft, ListOrdered, Mic, MicOff, Settings } from 'lucide-react'
+import {
+  ArrowLeft,
+  Headphones,
+  ListOrdered,
+  Mic,
+  MicOff,
+  Pause,
+  Play,
+  Settings,
+} from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import { cn } from '@/lib/utils'
 import { formatDuration, type TimeEstimate } from '../hooks/useReadingSpeed'
 import type { VoiceNavState } from '../hooks/useVoiceNav'
+import type { TTSState } from '../hooks/useTTS'
 
 interface ReaderTopbarProps {
   title: string
@@ -14,6 +24,7 @@ interface ReaderTopbarProps {
   voice: VoiceNavState
   voiceEnabled: boolean
   onToggleVoice: () => void
+  tts: TTSState
   onOpenToc: () => void
   onOpenSettings: () => void
 }
@@ -26,6 +37,7 @@ export function ReaderTopbar({
   voice,
   voiceEnabled,
   onToggleVoice,
+  tts,
   onOpenToc,
   onOpenSettings,
 }: ReaderTopbarProps) {
@@ -67,6 +79,39 @@ export function ReaderTopbar({
             </TooltipProvider>
           )}
         </div>
+      )}
+      {tts.supported && (
+        <TooltipProvider delayDuration={300}>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                variant="ghost"
+                size="icon"
+                onClick={tts.toggle}
+                aria-label={tts.status === 'playing' ? 'Pause audiobook' : 'Play audiobook'}
+                aria-pressed={tts.status === 'playing'}
+                className={cn(tts.status === 'playing' && 'text-primary')}
+              >
+                {tts.status === 'playing' ? (
+                  <Pause className="h-4 w-4" />
+                ) : tts.status === 'paused' ? (
+                  <Headphones className="h-4 w-4" />
+                ) : (
+                  <Play className="h-4 w-4" />
+                )}
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent side="bottom">
+              {tts.status === 'error'
+                ? (tts.errorMessage ?? 'Speech error')
+                : tts.status === 'playing'
+                  ? 'Pause audiobook'
+                  : tts.status === 'paused'
+                    ? 'Resume audiobook'
+                    : 'Play audiobook'}
+            </TooltipContent>
+          </Tooltip>
+        </TooltipProvider>
       )}
       {voice.supported && (
         <TooltipProvider delayDuration={300}>

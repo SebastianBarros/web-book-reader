@@ -29,6 +29,9 @@ export interface LayoutSettings {
   fontFamily: string
   showEstimates: boolean
   voiceNavEnabled: boolean
+  ttsVoiceURI: string | null
+  ttsRate: number
+  ttsPitch: number
 }
 
 export const defaultSettings: LayoutSettings = {
@@ -42,6 +45,9 @@ export const defaultSettings: LayoutSettings = {
   fontFamily: 'Literata',
   showEstimates: true,
   voiceNavEnabled: false,
+  ttsVoiceURI: null,
+  ttsRate: 1.0,
+  ttsPitch: 1.0,
 }
 
 export interface ReadingStats {

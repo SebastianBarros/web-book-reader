@@ -9,6 +9,7 @@ import { useReadingProgress } from './hooks/useReadingProgress'
 import { useLayoutSettings } from './hooks/useLayoutSettings'
 import { useReadingSpeed } from './hooks/useReadingSpeed'
 import { useToc } from './hooks/useToc'
+import { useTTS } from './hooks/useTTS'
 import { useVoiceNav } from './hooks/useVoiceNav'
 import { ReaderTopbar } from './components/ReaderTopbar'
 import { ReaderNav } from './components/ReaderNav'
@@ -63,6 +64,11 @@ export default function Reader() {
   const { settings, update } = useLayoutSettings(view)
   const tocItems = useToc(view)
   const voice = useVoiceNav(view, settings.voiceNavEnabled)
+  const tts = useTTS(view, {
+    voiceURI: settings.ttsVoiceURI,
+    rate: settings.ttsRate,
+    pitch: settings.ttsPitch,
+  })
 
   useEffect(() => {
     if (error) {
@@ -77,6 +83,16 @@ export default function Reader() {
     }
   }, [voice.status, update])
 
+  useEffect(() => {
+    if (!view) return
+    const onRelocate = (ev: Event) => {
+      const detail = (ev as CustomEvent).detail as { reason?: string } | undefined
+      tts.handleRelocate(detail?.reason)
+    }
+    view.addEventListener('relocate', onRelocate)
+    return () => view.removeEventListener('relocate', onRelocate)
+  }, [view, tts])
+
   return (
     <div className="flex h-screen flex-col bg-background">
       <ReaderTopbar
@@ -87,6 +103,7 @@ export default function Reader() {
         voice={voice}
         voiceEnabled={settings.voiceNavEnabled}
         onToggleVoice={() => update({ voiceNavEnabled: !settings.voiceNavEnabled })}
+        tts={tts}
         onOpenToc={() => setTocOpen(true)}
         onOpenSettings={() => setSettingsOpen(true)}
       />
