@@ -51,7 +51,7 @@ src/
     reader/                         # Reader screen, colocated components + hooks
       Reader.tsx                    # thin shell wiring hooks together
       components/
-        ReaderTopbar.tsx            # title, progress, time estimates, mic + play/pause, toc/settings buttons
+        ReaderTopbar.tsx            # title, progress, time estimates, mic + play/pause + sleep (moon), toc/settings buttons
         ReaderNav.tsx               # keyboard + click zones for page turns
         TocSheet.tsx                # chapter navigation (flat TOC, current highlighted)
         SettingsSheet.tsx           # flow, font, size, line-height, margins, theme, voice, rate, pitch
@@ -75,6 +75,7 @@ src/
     utils.ts                        # cn() class-merge helper
     ttsWorker.ts                    # Cloudflare Worker client (synthesize, listCloudVoices)
     cloudVoices.ts                  # curated Google voice shortlist shown in the cloud picker
+    chapterBoundaries.ts            # shared TOC-anchor-position computation (useReadingSpeed estimates)
   vendor/
     foliate-js/                     # vendored upstream, PDF stubbed out
 ```
@@ -331,6 +332,27 @@ When `playCloudHead()` eventually reaches the failed head, it **stops playback**
 
 A click listener on the loaded section doc watches for clicks on block-level elements (`p, li, blockquote, h1–h6, dd, dt, pre, figcaption`), skips link clicks (foliate handles those), builds a `Range` over the clicked block, cancels the current queue, and primes a fresh queue from `tts.from(range)`. Works for both providers.
 
+### Stop at end of chapter
+
+A moon icon appears in the top bar during audiobook playback. Clicking it arms **chapter-end sleep mode**; TTS auto-pauses when it crosses into a different TOC chapter.
+
+The tricky part was chapter detection — three approaches failed before the fourth stuck:
+
+1. **Foliate's `relocate.tocItem.href`.** Silently stuck on the first chapter for this particular MOBI even as TTS progressed through subsequent chapters. `TOCProgress` uses `doc.getElementById(...)` to locate chapter fragment anchors, and the anchors can't be found on this book's rendered doc — same root cause as #2 below.
+2. **Paginator's `fraction`.** Page-granular, not paragraph-granular. When several paragraphs share a visible page, fraction doesn't change even though blocks advance and audio moves across chapters.
+3. **Pre-computed fraction-indexed boundaries.** Same page-granularity problem.
+4. **Block-based chapter resolver** (current). Each prefetched block already carries a `firstRange` (captured for auto-page-turn). At prefetch time we ask a Reader-supplied `resolveChapterForRange(range)` function which TOC chapter that range belongs to, and stash the result on the queue item. On `audio.onplay` we compare the block's chapterKey against the armed one; different → stop + toast.
+
+The resolver itself was its own sub-puzzle. Foliate's MOBI-rendered doc has `contentType: 'text/html'` but is **not** an `HTMLDocument` instance — which means the browser doesn't index `id` attributes for `getElementById` or `[id="…"]` lookups. Both return null even though 39 `<a id="filepos…">` anchors are in the DOM. Resolution:
+
+- Walk `doc.querySelectorAll('[id]')` once per section doc and build our own `Map<id, Element>`. `querySelectorAll` with an attribute selector doesn't rely on the id-attribute index, so it works regardless of parse mode.
+- For each TOC href, derive the expected id (MOBI: `filepos${NNN}`, EPUB: fragment after `#`) and look it up in the map.
+- Sort matched anchors by `compareDocumentPosition` to get them in reading order.
+- Given a block's range, find the last anchor whose position **precedes** the range's start container (bitmask of `Node.DOCUMENT_POSITION_*` constants, which work across realms).
+- **Duck-type the element check** (`nodeType === 1`) — `instanceof Element` fails across realms because the iframe doc's Element class is a different constructor than the main window's.
+
+Lazy arming: the hook captures the armed chapter on the first block-start after the moon is clicked, not at click time, so order of operations ("play first, then moon" vs anything else) doesn't matter. When crossed, the hook fires a sonner toast, clears sleep mode, cancels the queue, and sets status to idle.
+
 ### Voice / rate / pitch settings
 
 - `ttsCloudVoice` picks from a curated shortlist in [cloudVoices.ts](src/lib/cloudVoices.ts) — four Google voices chosen by ear for Spanish audiobook quality: `es-US-Chirp-HD-F` (default), `es-US-Chirp-HD-D`, `es-ES-Chirp-HD-F`, `es-ES-Neural2-G`. The worker exposes `GET /voices?languageCode=…` if we ever want to show the full catalog.
@@ -345,6 +367,7 @@ A click listener on the loaded section doc watches for clicks on block-level ele
 - **First block always has some latency** (fetch time, ~200–700 ms) — unavoidable, we can't prefetch what we don't have yet. Subsequent blocks should feel instant.
 - **Voices load asynchronously** for browser provider; picker may show "Loading…" briefly.
 - **Quest 3 Browser.** Chromium-based; cloud provider and click-to-jump both work. Browser provider quality depends on the headset OS's bundled voice.
+- **Non-`HTMLDocument` rendered docs** (seen with some MOBI files) break `getElementById`. The chapter resolver ([stop at end of chapter](#stop-at-end-of-chapter)) works around this by walking `querySelectorAll('[id]')` results directly and using `nodeType === 1` instead of `instanceof Element`.
 
 ## 7. Theming
 

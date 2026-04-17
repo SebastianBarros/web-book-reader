@@ -1,9 +1,20 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { toast } from 'sonner'
 import type { View } from '@/vendor/foliate-js/view.js'
 import type { TTSProvider } from '@/lib/db'
 import { synthesize } from '@/lib/ttsWorker'
 
 export type TTSStatus = 'idle' | 'playing' | 'paused' | 'error'
+export type SleepMode = 'off' | 'chapter-end'
+
+export interface RelocateDetail {
+  reason?: string
+  /**
+   * Legacy field — kept so existing callers compile. No longer used by the
+   * hook; chapter detection is now block-driven via `TTSOptions.resolveChapterForRange`.
+   */
+  chapterKey?: string | null
+}
 
 export interface TTSState {
   supported: boolean
@@ -11,11 +22,18 @@ export interface TTSState {
   /** True while cloud playback is waiting on a block's audio fetch. */
   loading: boolean
   errorMessage: string | null
+  sleepMode: SleepMode
+  /**
+   * Switch sleep mode. Arming is lazy: when you switch to `chapter-end`, the
+   * hook captures the current chapter on the next relocate it receives, so
+   * callers don't need to pass one. Flip to `'off'` to disarm.
+   */
+  setSleepMode: (mode: SleepMode) => void
   play: () => void
   pause: () => void
   toggle: () => void
   stop: () => void
-  handleRelocate: (reason: string | undefined) => void
+  handleRelocate: (detail: RelocateDetail) => void
 }
 
 export interface TTSOptions {
@@ -24,6 +42,15 @@ export interface TTSOptions {
   cloudVoice: string
   rate: number
   pitch: number
+  /**
+   * Given a DOM Range (typically a block's first-word range), returns the
+   * index of the TOC chapter that range belongs to, or null if it can't be
+   * resolved. The hook uses this per-block during cloud playback to detect
+   * chapter boundaries — more reliable than foliate's tocItem.href tracking
+   * (which can freeze on some MOBIs) and finer-grained than the paginator's
+   * per-page fraction (which doesn't move when multiple blocks share a page).
+   */
+  resolveChapterForRange?: (range: Range) => number | null
 }
 
 interface ParsedUtterance {
@@ -45,6 +72,13 @@ interface CloudQueueItem {
    * the paginator when we actually begin playing the block.
    */
   firstRange: Range | null
+  /**
+   * Index of the TOC chapter this block belongs to, resolved via the
+   * caller-supplied `resolveChapterForRange` when firstRange was captured.
+   * Null when unresolvable (no TOC, range doesn't match any anchor's section,
+   * etc.).
+   */
+  chapterKey: string | null
 }
 
 const RETRY_DELAYS_MS = [500, 2000, 5000]
@@ -134,6 +168,13 @@ export function useTTS(view: View | null, opts: TTSOptions): TTSState {
   const [status, setStatus] = useState<TTSStatus>('idle')
   const [loading, setLoading] = useState(false)
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
+  const [sleepMode, setSleepModeRawState] = useState<SleepMode>('off')
+  const sleepModeRef = useRef<SleepMode>('off')
+  // Single writer so state + ref never diverge.
+  const setSleepModeState = useCallback((mode: SleepMode) => {
+    sleepModeRef.current = mode
+    setSleepModeRawState(mode)
+  }, [])
 
   const statusRef = useRef<TTSStatus>('idle')
   const optsRef = useRef<TTSOptions>(opts)
@@ -142,6 +183,8 @@ export function useTTS(view: View | null, opts: TTSOptions): TTSState {
   const currentAudioRef = useRef<HTMLAudioElement | null>(null)
   const initializedDocRef = useRef<Document | null>(null)
   const selfAdvancePendingRef = useRef(false)
+  /** Chapter href that was current when the user armed chapter-end sleep. */
+  const armedAtTocHrefRef = useRef<string | null>(null)
 
   // Cloud-only prefetch state
   const cloudQueueRef = useRef<CloudQueueItem[]>([])
@@ -264,6 +307,10 @@ export function useTTS(view: View | null, opts: TTSOptions): TTSState {
       // Capture this block's first-word Range BEFORE the next tts.next() call
       // overwrites foliate's internal #ranges map.
       const firstRange = captureFirstRange(v, parsed)
+      const chapterIdx =
+        firstRange && optsRef.current.resolveChapterForRange
+          ? optsRef.current.resolveChapterForRange(firstRange)
+          : null
       const aborter = new AbortController()
       const item: CloudQueueItem = {
         parsed,
@@ -274,6 +321,7 @@ export function useTTS(view: View | null, opts: TTSOptions): TTSState {
         failed: false,
         failureMessage: null,
         firstRange,
+        chapterKey: chapterIdx !== null && chapterIdx >= 0 ? `ch:${chapterIdx}` : null,
       }
       item.fetchPromise = synthesizeWithRetry(
         parsed.text,
@@ -314,6 +362,10 @@ export function useTTS(view: View | null, opts: TTSOptions): TTSState {
       const parsed = parseSsml(firstSsml)
       if (!parsed.text.trim()) return false
       const firstRange = captureFirstRange(v, parsed)
+      const chapterIdx =
+        firstRange && optsRef.current.resolveChapterForRange
+          ? optsRef.current.resolveChapterForRange(firstRange)
+          : null
       const aborter = new AbortController()
       const item: CloudQueueItem = {
         parsed,
@@ -324,6 +376,7 @@ export function useTTS(view: View | null, opts: TTSOptions): TTSState {
         failed: false,
         failureMessage: null,
         firstRange,
+        chapterKey: chapterIdx !== null && chapterIdx >= 0 ? `ch:${chapterIdx}` : null,
       }
       item.fetchPromise = synthesizeWithRetry(
         parsed.text,
@@ -505,6 +558,26 @@ export function useTTS(view: View | null, opts: TTSOptions): TTSState {
       if (currentAudioRef.current !== myAudio) return
       if (statusRef.current !== 'playing') return
       setLoading(false)
+
+      // Chapter-end sleep check — fires per-block, driven by the block's
+      // resolved chapterKey rather than foliate's paginator fraction.
+      if (sleepModeRef.current === 'chapter-end' && head.chapterKey !== null) {
+        if (armedAtTocHrefRef.current === null) {
+          armedAtTocHrefRef.current = head.chapterKey
+        } else if (head.chapterKey !== armedAtTocHrefRef.current) {
+          armedAtTocHrefRef.current = null
+          setSleepModeState('off')
+          updateStatus('idle')
+          setLoading(false)
+          cancelEverything()
+          initializedDocRef.current = null
+          try {
+            toast.message('Audiobook paused — end of chapter reached.')
+          } catch {
+            // ignore
+          }
+        }
+      }
     }
     audio.onended = () => {
       if (currentAudioRef.current !== myAudio) return
@@ -718,6 +791,8 @@ export function useTTS(view: View | null, opts: TTSOptions): TTSState {
     setLoading(false)
     cancelEverything()
     initializedDocRef.current = null
+    setSleepModeState('off')
+    armedAtTocHrefRef.current = null
   }, [cancelEverything, updateStatus])
 
   const toggle = useCallback(() => {
@@ -725,8 +800,24 @@ export function useTTS(view: View | null, opts: TTSOptions): TTSState {
     else void play()
   }, [pause, play])
 
+  const setSleepMode = useCallback(
+    (mode: SleepMode) => {
+      setSleepModeState(mode)
+      // Arming is lazy — the first relocate after we enter chapter-end mode
+      // captures the armed chapter. Flipping off clears the armed value.
+      if (mode === 'off') armedAtTocHrefRef.current = null
+    },
+    [setSleepModeState],
+  )
+
   const handleRelocate = useCallback(
-    (reason: string | undefined) => {
+    (detail: RelocateDetail) => {
+      const reason = detail.reason
+
+      // Reason-based cancel (user page-turn / navigation / selection).
+      // Chapter-end detection lives in `audio.onplay` now, block-by-block,
+      // since the paginator's fraction is too coarse for reliable chapter
+      // detection when multiple blocks share a page.
       if (selfAdvancePendingRef.current) {
         selfAdvancePendingRef.current = false
         return
@@ -737,9 +828,11 @@ export function useTTS(view: View | null, opts: TTSOptions): TTSState {
         setLoading(false)
         cancelEverything()
         initializedDocRef.current = null
+        setSleepModeState('off')
+        armedAtTocHrefRef.current = null
       }
     },
-    [cancelEverything, updateStatus],
+    [cancelEverything, setSleepModeState, updateStatus],
   )
 
   // Click-to-jump: tapping any paragraph-level block starts TTS from it.
@@ -838,6 +931,8 @@ export function useTTS(view: View | null, opts: TTSOptions): TTSState {
     status,
     loading,
     errorMessage,
+    sleepMode,
+    setSleepMode,
     play: () => {
       void play()
     },

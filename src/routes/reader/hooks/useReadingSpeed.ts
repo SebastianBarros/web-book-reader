@@ -6,6 +6,7 @@ import {
   saveReadingStats,
   type ReadingStats,
 } from '@/lib/db'
+import { computeChapterBoundaries } from '@/lib/chapterBoundaries'
 
 const IDLE_GAP_MS = 5 * 60 * 1000
 const MIN_SAMPLE_MS = 750
@@ -29,80 +30,6 @@ function collectTocHrefs(items: unknown, out: string[]): void {
     const item = raw as { href?: string; subitems?: unknown }
     if (item.href) out.push(item.href)
     if (item.subitems) collectTocHrefs(item.subitems, out)
-  }
-}
-
-// Compute chapter boundary fractions by resolving each TOC href to its DOM
-// anchor inside the target section, then measuring the anchor's text offset
-// relative to the section's total text length. This gives intra-section
-// precision for books where multiple chapters share one spine section.
-async function computeChapterBoundariesAsync(view: View): Promise<number[]> {
-  const book = view.book
-  if (!book?.toc || !book.resolveHref) return []
-  const sectionFractions = view.getSectionFractions?.() ?? []
-  if (sectionFractions.length === 0) return []
-
-  const hrefs: string[] = []
-  collectTocHrefs(book.toc, hrefs)
-
-  // Group by target section so each section's DOM is parsed at most once.
-  const bySection = new Map<number, Array<(doc: Document) => unknown>>()
-  for (const href of hrefs) {
-    const resolved = book.resolveHref(href)
-    if (!resolved || typeof resolved.index !== 'number') continue
-    const list = bySection.get(resolved.index) ?? []
-    list.push(resolved.anchor as (doc: Document) => unknown)
-    bySection.set(resolved.index, list)
-  }
-
-  const set = new Set<number>()
-  for (const [index, anchors] of bySection) {
-    const section = book.sections[index]
-    const sectionStart = sectionFractions[index] ?? 0
-    const sectionEnd = sectionFractions[index + 1] ?? sectionStart
-    const sectionRange = sectionEnd - sectionStart
-    if (sectionRange <= 0 || !section?.createDocument) {
-      set.add(sectionStart)
-      continue
-    }
-    try {
-      const doc = await section.createDocument()
-      const body = doc.body
-      const totalLen = body?.textContent?.length ?? 0
-      for (const anchor of anchors) {
-        const within = totalLen > 0 ? measureWithinSection(doc, anchor, totalLen) : 0
-        set.add(sectionStart + within * sectionRange)
-      }
-    } catch (err) {
-      console.debug('boundary: section load failed', index, err)
-      set.add(sectionStart)
-    }
-  }
-  set.add(1)
-  return [...set].sort((a, b) => a - b)
-}
-
-function measureWithinSection(
-  doc: Document,
-  anchor: (doc: Document) => unknown,
-  totalLen: number,
-): number {
-  try {
-    const result = anchor(doc)
-    if (!result || !doc.body) return 0
-    const range = doc.createRange()
-    range.setStart(doc.body, 0)
-    if (result instanceof Range) {
-      range.setEnd(result.startContainer, result.startOffset)
-    } else if (result instanceof Node) {
-      range.setEndBefore(result)
-    } else {
-      return 0
-    }
-    const before = range.toString().length
-    return Math.max(0, Math.min(1, before / totalLen))
-  } catch {
-    return 0
   }
 }
 
@@ -132,7 +59,9 @@ export function useReadingSpeed(view: View | null): TimeEstimate {
     }
     let cancelled = false
     boundariesRef.current = []
-    computeChapterBoundariesAsync(view)
+    const hrefs: string[] = []
+    collectTocHrefs(view.book?.toc, hrefs)
+    computeChapterBoundaries(view, hrefs)
       .then((bs) => {
         if (!cancelled) boundariesRef.current = bs
       })

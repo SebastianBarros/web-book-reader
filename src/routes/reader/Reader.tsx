@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import { toast } from 'sonner'
 import { Loader2 } from 'lucide-react'
@@ -65,12 +65,114 @@ export default function Reader() {
   const { settings, update } = useLayoutSettings(view)
   const tocItems = useToc(view)
   const voice = useVoiceNav(view, settings.voiceNavEnabled)
+
+  // Per-book chapter resolver: given a DOM Range, returns which TOC item
+  // (all depths — matches the picker) contains it. Used by useTTS to detect
+  // chapter boundaries at block boundaries, independent of the paginator's
+  // coarse page-level fraction.
+  const resolveChapterRefImpl = useRef<(range: Range) => number | null>(() => null)
+  useEffect(() => {
+    if (!view) {
+      resolveChapterRefImpl.current = () => null
+      return
+    }
+    const sectionAnchorsCache = new Map<
+      Document,
+      Array<{ chapterIdx: number; anchor: Element }>
+    >()
+    const book = view.book
+    // Derive the DOM anchor id we expect for a given TOC href.
+    // MOBI: filepos:NNNNNNN → id=filepos{NNN}
+    // EPUB: path#fragment → id={fragment}
+    const getExpectedAnchorId = (href: string): string | null => {
+      const mobiMatch = href.match(/^filepos:(.+)$/)
+      if (mobiMatch) return `filepos${mobiMatch[1]}`
+      const hashIdx = href.indexOf('#')
+      if (hashIdx >= 0) return href.slice(hashIdx + 1)
+      return null
+    }
+
+    // Duck-type element check — `instanceof Element` uses the current window's
+    // constructor chain and returns false for nodes coming from an iframe's
+    // document. nodeType===1 is ELEMENT_NODE universally.
+    const isElement = (n: unknown): n is Element =>
+      !!n && typeof n === 'object' && (n as Node).nodeType === 1
+
+    const getSectionAnchors = (doc: Document) => {
+      const cached = sectionAnchorsCache.get(doc)
+      if (cached) return cached
+
+      // Build an id → element map by walking elements directly. Bypasses the
+      // browser's `getElementById` / `[id="…"]` lookup which silently fails on
+      // foliate's MOBI-rendered doc (text/html contentType but not an
+      // HTMLDocument instance, so id-attribute indexing doesn't work).
+      const idMap = new Map<string, Element>()
+      const allWithId = doc.querySelectorAll('[id]')
+      for (const el of Array.from(allWithId)) {
+        const id = el.getAttribute('id')
+        if (id) idMap.set(id, el)
+      }
+
+      const out: Array<{ chapterIdx: number; anchor: Element }> = []
+      if (book?.resolveHref) {
+        for (let i = 0; i < tocItems.length; i++) {
+          const resolved = book.resolveHref(tocItems[i].href)
+          if (!resolved) continue
+          // Try foliate's own anchor resolver first (works for most EPUBs).
+          let node: unknown = null
+          try {
+            node = resolved.anchor(doc)
+          } catch {
+            // ignore
+          }
+          if (!isElement(node)) {
+            // Fallback: look up via our pre-built id map.
+            const id = getExpectedAnchorId(tocItems[i].href)
+            if (id) {
+              const found = idMap.get(id)
+              if (found) node = found
+            }
+          }
+          if (isElement(node)) out.push({ chapterIdx: i, anchor: node })
+        }
+        out.sort((a, b) => {
+          const cmp = a.anchor.compareDocumentPosition(b.anchor)
+          if (cmp & Node.DOCUMENT_POSITION_FOLLOWING) return -1
+          if (cmp & Node.DOCUMENT_POSITION_PRECEDING) return 1
+          return 0
+        })
+      }
+      sectionAnchorsCache.set(doc, out)
+      return out
+    }
+    resolveChapterRefImpl.current = (range: Range) => {
+      const doc = range.startContainer.ownerDocument
+      if (!doc) return null
+      const anchors = getSectionAnchors(doc)
+      if (anchors.length === 0) return null
+      let found = -1
+      for (const { chapterIdx, anchor } of anchors) {
+        const cmp = anchor.compareDocumentPosition(range.startContainer)
+        const anchorBefore =
+          cmp === 0 || !!(cmp & Node.DOCUMENT_POSITION_FOLLOWING) ||
+          !!(cmp & Node.DOCUMENT_POSITION_CONTAINED_BY)
+        if (anchorBefore) found = chapterIdx
+        else break
+      }
+      return found >= 0 ? found : null
+    }
+  }, [view, tocItems])
+  const resolveChapterForRange = useCallback(
+    (range: Range) => resolveChapterRefImpl.current(range),
+    [],
+  )
   const tts = useTTS(view, {
     provider: settings.ttsProvider,
     voiceURI: settings.ttsVoiceURI,
     cloudVoice: settings.ttsCloudVoice,
     rate: settings.ttsRate,
     pitch: settings.ttsPitch,
+    resolveChapterForRange,
   })
 
   useEffect(() => {
@@ -86,11 +188,13 @@ export default function Reader() {
     }
   }, [voice.status, update])
 
+  // Forward relocate reason to the hook for user-nav cancel; chapter-end
+  // detection is now done block-by-block inside useTTS via resolveChapterForRange.
   useEffect(() => {
     if (!view) return
     const onRelocate = (ev: Event) => {
       const detail = (ev as CustomEvent).detail as { reason?: string } | undefined
-      tts.handleRelocate(detail?.reason)
+      tts.handleRelocate({ reason: detail?.reason, chapterKey: null })
     }
     view.addEventListener('relocate', onRelocate)
     return () => view.removeEventListener('relocate', onRelocate)
@@ -125,6 +229,9 @@ export default function Reader() {
         voiceEnabled={settings.voiceNavEnabled}
         onToggleVoice={() => update({ voiceNavEnabled: !settings.voiceNavEnabled })}
         tts={tts}
+        onToggleSleepMode={() =>
+          tts.setSleepMode(tts.sleepMode === 'chapter-end' ? 'off' : 'chapter-end')
+        }
         onOpenToc={() => setTocOpen(true)}
         onOpenSettings={() => setSettingsOpen(true)}
       />

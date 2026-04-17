@@ -6,6 +6,7 @@ import {
   Loader2,
   Mic,
   MicOff,
+  Moon,
   Pause,
   Play,
   Settings,
@@ -26,6 +27,7 @@ interface ReaderTopbarProps {
   voiceEnabled: boolean
   onToggleVoice: () => void
   tts: TTSState
+  onToggleSleepMode: () => void
   onOpenToc: () => void
   onOpenSettings: () => void
 }
@@ -39,6 +41,7 @@ export function ReaderTopbar({
   voiceEnabled,
   onToggleVoice,
   tts,
+  onToggleSleepMode,
   onOpenToc,
   onOpenSettings,
 }: ReaderTopbarProps) {
@@ -117,6 +120,32 @@ export function ReaderTopbar({
                     : tts.status === 'paused'
                       ? 'Resume audiobook'
                       : 'Play audiobook'}
+            </TooltipContent>
+          </Tooltip>
+        </TooltipProvider>
+      )}
+      {tts.supported && (tts.status === 'playing' || tts.status === 'paused') && (
+        <TooltipProvider delayDuration={300}>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                variant={tts.sleepMode === 'chapter-end' ? 'default' : 'ghost'}
+                size="icon"
+                onClick={onToggleSleepMode}
+                aria-label={
+                  tts.sleepMode === 'chapter-end'
+                    ? 'Disable stop-at-chapter-end'
+                    : 'Stop at end of chapter'
+                }
+                aria-pressed={tts.sleepMode === 'chapter-end'}
+              >
+                <Moon className="h-4 w-4" />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent side="bottom">
+              {tts.sleepMode === 'chapter-end'
+                ? 'Will pause at end of this chapter'
+                : 'Stop audiobook at end of chapter'}
             </TooltipContent>
           </Tooltip>
         </TooltipProvider>
